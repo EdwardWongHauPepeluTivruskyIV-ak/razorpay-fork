@@ -181,19 +181,23 @@ export class AndroidObserverDriver {
     };
   }
 
-  async sendHeartbeat() {
+  /**
+   * Submits an HMAC-signed liveness heartbeat (same signature scheme as observations).
+   * @param {{ timestampOverride?: number, unsigned?: boolean }} [opts] test hooks
+   */
+  async sendHeartbeat(opts = {}) {
     if (!this.deviceId) throw new Error('Cannot send heartbeat: device not paired.');
     const url = `${this.apiBaseUrl}/api/v1/pollers/android/heartbeat`;
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Device-Id': this.deviceId
-      },
-      body: JSON.stringify({ deviceId: this.deviceId, timestamp: Date.now() })
-    });
+    const timestamp = (opts.timestampOverride !== undefined ? opts.timestampOverride : Date.now()).toString();
+    const bodyString = JSON.stringify({ deviceId: this.deviceId, timestamp: Number(timestamp) });
+    const headers = { 'Content-Type': 'application/json', 'X-Device-Id': this.deviceId };
+    if (!opts.unsigned) {
+      headers['X-Timestamp'] = timestamp;
+      headers['X-Signature'] = generateHmac(`${bodyString}:${timestamp}`, this.signingKey);
+    }
 
+    const res = await fetch(url, { method: 'POST', headers, body: bodyString });
     return await res.json();
   }
 

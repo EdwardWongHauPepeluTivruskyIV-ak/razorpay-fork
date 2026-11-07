@@ -51,6 +51,39 @@ describe('Android Payment Observer Integration Tests', () => {
     assert.ok(hbResult.timestamp);
   });
 
+  test('rejects unsigned heartbeat so a known device id alone cannot fake liveness', async () => {
+    const hbResult = await driver.sendHeartbeat({ unsigned: true });
+    assert.notEqual(hbResult.status, 'HEARTBEAT_ACK');
+    assert.match(hbResult.error, /X-Signature/);
+  });
+
+  test('rejects replayed heartbeat outside the 60s timestamp window', async () => {
+    const hbResult = await driver.sendHeartbeat({ timestampOverride: Date.now() - 120000 });
+    assert.notEqual(hbResult.status, 'HEARTBEAT_ACK');
+    assert.match(hbResult.error, /validity window/);
+  });
+
+  test('rejects heartbeat signed with the wrong key', async () => {
+    const realKey = driver.signingKey;
+    driver.signingKey = 'not-the-real-signing-key';
+    try {
+      const hbResult = await driver.sendHeartbeat();
+      assert.notEqual(hbResult.status, 'HEARTBEAT_ACK');
+      assert.match(hbResult.error, /HMAC/);
+    } finally {
+      driver.signingKey = realKey;
+    }
+  });
+
+  test('rejects heartbeat for an unknown device', async () => {
+    const stranger = new AndroidObserverDriver({ apiBaseUrl: `http://localhost:${apiInstance.port}` });
+    stranger.deviceId = 'not-a-paired-device';
+    stranger.signingKey = 'whatever';
+    const hbResult = await stranger.sendHeartbeat();
+    assert.notEqual(hbResult.status, 'HEARTBEAT_ACK');
+    assert.match(hbResult.error, /not authorized/);
+  });
+
   test('rejects observation with expired/drifted timestamp (Replay Protection)', async () => {
     // Timestamp 2 minutes in the past (> 60s drift)
     const oldTimestamp = Date.now() - 120000;

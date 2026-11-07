@@ -589,13 +589,56 @@ export function registerPollerRoutes(server, ctx) {
   server.post('/api/v1/observers/sms', (req, res) => handleAndroidSmsEvents(req, res, { requirePackage: false }));
 
   // --- ANDROID HEARTBEAT HANDLER ---
+  // A fresh heartbeat is what lets the gateway accept new UPI payments, so it must prove it came
+  // from the paired phone: same registered-device, HMAC signature and replay-window checks as
+  // observations. Without this, anyone who learned a device id could keep the gateway "online"
+  // while the real phone is off and no bank alert can ever be observed.
   const handleAndroidHeartbeat = async (req, res) => {
-    const body = await HttpServer.parseBody(req);
-    const deviceId = req.headers['x-device-id'] || body.deviceId;
+    const rawBodyText = await new Promise(resolve => {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => resolve(data));
+    });
 
-    if (deviceId) {
-      ctx.db.execute('UPDATE android_devices SET last_heartbeat_at = datetime(\'now\') WHERE id = ?', [deviceId]);
+    let body = {};
+    try {
+      body = rawBodyText ? JSON.parse(rawBodyText) : {};
+    } catch {
+      HttpServer.json(res, 400, { error: 'Invalid JSON payload.' });
+      return;
     }
+
+    const deviceId = req.headers['x-device-id'] || body.deviceId;
+    if (!deviceId) {
+      HttpServer.json(res, 400, { error: 'Missing required X-Device-Id header or deviceId.' });
+      return;
+    }
+
+    const device = ctx.db.queryOne('SELECT * FROM android_devices WHERE id = ? AND is_active = 1', [deviceId]);
+    if (!device) {
+      HttpServer.json(res, 403, { error: 'Device not authorized or inactive.' });
+      return;
+    }
+
+    const timestampStr = req.headers['x-timestamp'];
+    const signature = req.headers['x-signature'];
+    if (!device.signing_key_hash || !timestampStr || !signature) {
+      HttpServer.json(res, 401, { error: 'Missing X-Timestamp / X-Signature headers.' });
+      return;
+    }
+
+    const ts = Number(timestampStr);
+    if (isNaN(ts) || Math.abs(Date.now() - ts) > 60000) {
+      HttpServer.json(res, 401, { error: 'Timestamp drift exceeded validity window (replay protection triggered).' });
+      return;
+    }
+
+    if (!verifyHmac(`${rawBodyText}:${timestampStr}`, device.signing_key_hash, signature)) {
+      HttpServer.json(res, 401, { error: 'Invalid cryptographic HMAC signature.' });
+      return;
+    }
+
+    ctx.db.execute('UPDATE android_devices SET last_heartbeat_at = datetime(\'now\') WHERE id = ?', [deviceId]);
 
     HttpServer.json(res, 200, {
       status: 'HEARTBEAT_ACK',
