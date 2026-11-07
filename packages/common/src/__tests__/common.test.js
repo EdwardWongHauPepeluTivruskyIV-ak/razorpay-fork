@@ -200,14 +200,18 @@ describe('@youpi/common Unit Tests', () => {
 
     test('validates unified ALLOWED_NOTIFICATION_PACKAGES and isAllowedNotificationPackage', () => {
       assert.ok(Array.isArray(ALLOWED_NOTIFICATION_PACKAGES));
-      assert.ok(ALLOWED_NOTIFICATION_PACKAGES.length >= 38);
+      assert.ok(ALLOWED_NOTIFICATION_PACKAGES.length >= 35);
 
       // Verify essential UPI and banking packages are included
       assert.equal(isAllowedNotificationPackage('com.phonepe.app'), true);
       assert.equal(isAllowedNotificationPackage('com.google.android.apps.nbu.paisa.user'), true);
       assert.equal(isAllowedNotificationPackage('net.one97.paytm'), true);
-      assert.equal(isAllowedNotificationPackage('com.google.android.apps.messaging'), true);
       assert.equal(isAllowedNotificationPackage('com.sbi.lotusintouch'), true);
+
+      // Personal messaging apps are never observed (their notifications carry private chats/SMS)
+      assert.equal(isAllowedNotificationPackage('com.google.android.apps.messaging'), false);
+      assert.equal(isAllowedNotificationPackage('com.samsung.android.messaging'), false);
+      assert.equal(isAllowedNotificationPackage('com.truecaller'), false);
 
       // Case-insensitivity and trim handling
       assert.equal(isAllowedNotificationPackage('  COM.PHONEPE.APP  '), true);

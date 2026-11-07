@@ -365,12 +365,22 @@ export function findUpiProviderById(id?: string): UpiProvider | undefined {
 }
 
 /**
- * Official companion SMS and banking notification application packages
- * permitted to deliver real-time credit payment observations to YOUPI Gateway.
+ * General-purpose messaging apps. Their notifications carry the user's personal chats and SMS,
+ * and a friend's message such as "I received Rs 500" would pass the observer's keyword filter,
+ * so they are never read by the notification listener. Bank SMS still reaches the gateway
+ * through the dedicated SMS path, which filters by institutional sender on the phone.
  */
-export const BANKING_AND_MESSAGING_PACKAGES: readonly string[] = Object.freeze([
+export const PERSONAL_MESSAGING_PACKAGES: readonly string[] = Object.freeze([
   'com.google.android.apps.messaging',
   'com.samsung.android.messaging',
+  'com.truecaller'
+]);
+
+/**
+ * Banking notification application packages permitted to deliver real-time credit payment
+ * observations to YOUPI Gateway (in addition to the UPI apps in UPI_PROVIDERS).
+ */
+export const BANKING_AND_MESSAGING_PACKAGES: readonly string[] = Object.freeze([
   'com.fampay.in',
   'com.sbi.lotusintouch',
   'com.hdfcbank.payzapp',
@@ -386,7 +396,7 @@ export const ALLOWED_NOTIFICATION_PACKAGES: readonly string[] = Object.freeze(
   Array.from(new Set([
     ...UPI_PROVIDERS.map(p => p.packageName.toLowerCase()),
     ...BANKING_AND_MESSAGING_PACKAGES.map(p => p.toLowerCase())
-  ])).sort()
+  ])).filter(p => !PERSONAL_MESSAGING_PACKAGES.includes(p)).sort()
 );
 
 /**
