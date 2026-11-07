@@ -7786,7 +7786,15 @@
       if (idEl) idEl.value = currentMerchantId || '';
 
       const currentM = merchantsList.find(m => m.id === currentMerchantId);
-      const host = window.location.origin;
+      // Websites load youpi.js from the public checkout host, never from this (private) admin
+      // host: "<prefix>-admin.<domain>" -> "<prefix>.<domain>", local admin :6001 -> checkout :7000.
+      const host = (() => {
+        const { protocol, hostname, port } = window.location;
+        const adminHost = /^([a-z0-9_-]+)-admin\./i;
+        if (adminHost.test(hostname)) return `${protocol}//${hostname.replace(adminHost, '$1.')}`;
+        if (port === '6001') return `${protocol}//${hostname}:7000`;
+        return window.location.origin;
+      })();
       const snippet = `<script src="${host}/youpi.js" data-youpi-key="${currentMerchantId}"><\/script>`;
       if (snippetEl) snippetEl.value = snippet;
 
