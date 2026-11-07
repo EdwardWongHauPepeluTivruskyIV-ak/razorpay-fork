@@ -18,7 +18,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 public class ApiClient {
-    private static final String TAG = "MittoPayApiClient";
+    private static final String TAG = "YouPIApiClient";
     private static final String PREFS_NAME = "mittopay_gateway_prefs";
     private static final String LEGACY_PREFS_NAME = "youpi_gateway_prefs";
     private final SharedPreferences prefs;
@@ -32,7 +32,7 @@ public class ApiClient {
             SharedPreferences legacyPrefs = this.context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
             if (legacyPrefs.contains("device_id")) {
                 primaryPrefs.edit()
-                    .putString("base_url", legacyPrefs.getString("base_url", "http://10.0.2.2:6100"))
+                    .putString("base_url", legacyPrefs.getString("base_url", ""))
                     .putString("device_id", legacyPrefs.getString("device_id", null))
                     .putString("signing_key", legacyPrefs.getString("signing_key", null))
                     .putString("merchant_id", legacyPrefs.getString("merchant_id", null))
@@ -47,7 +47,7 @@ public class ApiClient {
     }
 
     public String getBaseUrl() {
-        return prefs.getString("base_url", "http://10.0.2.2:6100");
+        return prefs.getString("base_url", "");
     }
 
     public String getDeviceId() {
@@ -58,8 +58,29 @@ public class ApiClient {
         return pair(baseUrl, enrollmentToken, deviceName, "00000000-0000-0000-0000-000000000001", "v1", 0);
     }
 
+    /**
+     * Bank alerts may only go to an HTTPS gateway. Plain http:// is accepted solely for local
+     * development hosts (emulator loopback / localhost), matching network_security_config.xml.
+     */
+    static boolean isAllowedGatewayUrl(String url) {
+        try {
+            URL u = new URL(url);
+            String scheme = u.getProtocol() == null ? "" : u.getProtocol().toLowerCase();
+            String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
+            if (host.isEmpty()) return false;
+            if ("https".equals(scheme)) return true;
+            return "http".equals(scheme) && ("localhost".equals(host) || "127.0.0.1".equals(host) || "10.0.2.2".equals(host));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public boolean pair(String baseUrl, String enrollmentToken, String deviceName, String merchantId, String version, long expiresAt) {
-        String cleanUrl = baseUrl.replaceAll("/+$", "");
+        String cleanUrl = baseUrl == null ? "" : baseUrl.trim().replaceAll("/+$", "");
+        if (!isAllowedGatewayUrl(cleanUrl)) {
+            Log.e(TAG, "Refusing to pair with non-HTTPS gateway URL: " + cleanUrl);
+            return false;
+        }
         String endpoint = cleanUrl + "/api/v1/pollers/android/pair";
 
         try {
@@ -108,7 +129,11 @@ public class ApiClient {
         String endpoint = baseUrl + "/api/v1/observers/sms";
 
         try {
-            String tsStr = String.valueOf(timestamp > 0 ? timestamp : System.currentTimeMillis());
+            // The signature timestamp must be the SEND time: the gateway rejects anything outside a
+            // 60 s window (replay protection). Signing with the carrier's SMS timestamp made every
+            // bank SMS that arrived late (common) fail with 401, so the payment was never detected.
+            // The SMS's own time still travels in the body as "timestamp".
+            String tsStr = String.valueOf(System.currentTimeMillis());
             JSONObject json = new JSONObject();
             json.put("deviceId", deviceId);
             if (clientMessageId != null && !clientMessageId.isEmpty()) {
@@ -116,17 +141,38 @@ public class ApiClient {
             }
             json.put("sender", sender != null ? sender : "UNKNOWN");
             json.put("body", body != null ? body : "");
-            json.put("timestamp", Long.parseLong(tsStr));
+            json.put("timestamp", timestamp > 0 ? timestamp : Long.parseLong(tsStr));
 
             String bodyString = json.toString();
             String sigPayload = bodyString + ":" + tsStr;
             String signature = calculateHmacSha256(sigPayload, signingKey);
 
             String response = postJson(endpoint, bodyString, deviceId, tsStr, signature);
-            Log.i(TAG, "SMS dispatched to Mitto Pay Gateway: " + (response != null ? "OK" : "FAILED"));
+            Log.i(TAG, "SMS dispatched to YouPI Gateway: " + (response != null ? "OK" : "FAILED"));
             return response != null;
         } catch (Exception e) {
             Log.e(TAG, "sendSms error: " + e.getMessage(), e);
+        }
+        return false;
+    }
+
+    /**
+     * Sends a bank SMS, retrying when the phone could not reach the gateway (no network, timeout)
+     * or the gateway answered 5xx. A 4xx answer is final (the gateway evaluated and rejected it).
+     * Each attempt is freshly timestamped and signed; resending is safe because the gateway drops
+     * duplicates of the same payment (unique bank reference / same-source dedup).
+     */
+    public boolean sendSmsWithRetry(String sender, String body, long timestamp, String clientMessageId) {
+        final long[] backoffMs = {0L, 3000L, 10000L, 30000L};
+        for (int attempt = 0; attempt < backoffMs.length; attempt++) {
+            if (backoffMs[attempt] > 0) {
+                try { Thread.sleep(backoffMs[attempt]); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return false; }
+            }
+            if (sendSms(sender, body, timestamp, clientMessageId)) return true;
+            int status = lastHttpStatus;
+            boolean retryable = status == 0 || status >= 500;
+            Log.w(TAG, "SMS dispatch attempt " + (attempt + 1) + " failed (HTTP " + status + ")" + (retryable ? ", will retry" : ", not retrying"));
+            if (!retryable) return false;
         }
         return false;
     }
@@ -135,17 +181,22 @@ public class ApiClient {
         if (!isPaired()) return false;
 
         String deviceId = prefs.getString("device_id", null);
+        String signingKey = prefs.getString("signing_key", null);
         String baseUrl = getBaseUrl();
         String endpoint = baseUrl + "/api/v1/pollers/android/heartbeat";
 
         try {
+            // Signed like observations: the gateway only counts this phone as online
+            // (and accepts new UPI payments) when the heartbeat proves it holds the key.
+            String tsStr = String.valueOf(System.currentTimeMillis());
             JSONObject json = new JSONObject();
             json.put("deviceId", deviceId);
-            json.put("timestamp", System.currentTimeMillis());
-            json.put("batteryPercent", 100);
-            json.put("isCharging", true);
+            json.put("timestamp", Long.parseLong(tsStr));
 
-            String response = postJson(endpoint, json.toString(), deviceId, null, null);
+            String bodyString = json.toString();
+            String signature = calculateHmacSha256(bodyString + ":" + tsStr, signingKey);
+
+            String response = postJson(endpoint, bodyString, deviceId, tsStr, signature);
             return response != null;
         } catch (Exception e) {
             Log.e(TAG, "Heartbeat error: " + e.getMessage());
@@ -199,8 +250,12 @@ public class ApiClient {
         prefs.edit().remove("device_id").remove("signing_key").apply();
     }
 
+    /** HTTP status of the most recent postJson call; 0 when the gateway could not be reached. */
+    private volatile int lastHttpStatus = 0;
+
     private String postJson(String urlString, String jsonBody, String deviceId, String timestamp, String signature) {
         HttpURLConnection conn = null;
+        lastHttpStatus = 0;
         try {
             URL url = new URL(urlString);
             conn = (HttpURLConnection) url.openConnection();
@@ -227,6 +282,7 @@ public class ApiClient {
             }
 
             int code = conn.getResponseCode();
+            lastHttpStatus = code;
             InputStream is = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
             if (is == null) return null;
 

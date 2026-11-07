@@ -66,7 +66,7 @@ public class MainActivity extends Activity {
 
         // Header Title
         TextView tvTitle = new TextView(this);
-        tvTitle.setText("Mitto Pay SMS Gateway");
+        tvTitle.setText("YouPI Observer");
         tvTitle.setTextColor(Color.WHITE);
         tvTitle.setTextSize(22f);
         tvTitle.setTypeface(null, Typeface.BOLD);
@@ -174,7 +174,7 @@ public class MainActivity extends Activity {
         lblManual.setPadding(0, 16, 0, 4);
         cardPairing.addView(lblManual);
 
-        etBaseUrl = createEditText(apiClient.getBaseUrl(), "http://your-server-ip:6100");
+        etBaseUrl = createEditText(apiClient.getBaseUrl(), "https://pay-api.yourdomain.com");
         cardPairing.addView(etBaseUrl);
 
         etEnrollmentToken = createEditText("", "Enrollment Secret Token");
@@ -205,15 +205,8 @@ public class MainActivity extends Activity {
 
         root.addView(cardPairing);
 
-        // Test SMS Trigger Button
-        Button btnTestSms = createAccentButton("Dispatch Test Bank Credit SMS");
-        btnTestSms.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                sendTestSms();
-            }
-        });
-        root.addView(btnTestSms);
+        // No "send test bank credit SMS" button: on a paired phone it posted a fabricated ₹500
+        // credit alert to the live gateway, which could settle a real customer's ₹500 session.
 
         scrollView.addView(root);
         setContentView(scrollView);
@@ -334,8 +327,8 @@ public class MainActivity extends Activity {
 
     private void showProminentDisclosureDialog() {
         new android.app.AlertDialog.Builder(this)
-            .setTitle("Mitto Pay — Sensitive Permissions Notice")
-            .setMessage("Mitto Pay SMS Gateway requires SMS access (RECEIVE_SMS, READ_SMS) strictly to detect inbound bank credit and UPI alerts for real-time payment reconciliation.\n\n"
+            .setTitle("YouPI Observer — Sensitive Permissions Notice")
+            .setMessage("YouPI Observer requires SMS access (RECEIVE_SMS, READ_SMS) strictly to detect inbound bank credit and UPI alerts for real-time payment reconciliation.\n\n"
                       + "• On-Device Filtering: All personal, promotional, or non-banking SMS are discarded directly on this phone and are never transmitted.\n"
                       + "• Data Minimization: Only alerts from official financial institution sender codes (e.g., VK-HDFCBK, SBIINB, AXISBK) are processed.\n"
                       + "• Security: Data is transmitted over encrypted TLS authenticated with HMAC-SHA256 to your configured merchant gateway.\n\n"
@@ -445,8 +438,8 @@ public class MainActivity extends Activity {
             }
 
             final String serverUrl = json.optString("serverUrl", json.optString("gatewayUrl", json.optString("apiBaseUrl", "")));
-            if (!serverUrl.startsWith("http://") && !serverUrl.startsWith("https://")) {
-                Toast.makeText(this, "INVALID YOUPI PAIRING QR", Toast.LENGTH_LONG).show();
+            if (!ApiClient.isAllowedGatewayUrl(serverUrl.replaceAll("/+$", ""))) {
+                Toast.makeText(this, "PAIRING QR REJECTED: gateway must use https://", Toast.LENGTH_LONG).show();
                 return;
             }
 
@@ -497,6 +490,10 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Please provide Gateway URL and Secret Token", Toast.LENGTH_SHORT).show();
             return;
         }
+        if (!ApiClient.isAllowedGatewayUrl(baseUrl.replaceAll("/+$", ""))) {
+            Toast.makeText(this, "Gateway URL must start with https://", Toast.LENGTH_LONG).show();
+            return;
+        }
 
         btnPairDevice.setEnabled(false);
         btnPairDevice.setText("Pairing with Gateway...");
@@ -516,28 +513,6 @@ public class MainActivity extends Activity {
                             btnPairDevice.setText("Manual Connect");
                             Toast.makeText(MainActivity.this, "Pairing Failed. Check URL and Enrollment Token.", Toast.LENGTH_LONG).show();
                         }
-                    }
-                });
-            }
-        }).start();
-    }
-
-    private void sendTestSms() {
-        if (!apiClient.isPaired()) {
-            Toast.makeText(this, "Pair device first before sending test SMS.", Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                String testSender = "HDFCBK";
-                String testBody = "Dear Customer, INR 500.00 credited to your A/C ending 4321 via UPI Ref 999888777666 on 01-OCT-26.";
-                final boolean ok = apiClient.sendSms(testSender, testBody, System.currentTimeMillis());
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        Toast.makeText(MainActivity.this, ok ? "Test Bank SMS Sent to Gateway!" : "Failed to send test SMS.", Toast.LENGTH_SHORT).show();
                     }
                 });
             }

@@ -6,10 +6,12 @@ import android.content.Intent;
 import android.provider.Telephony;
 import android.telephony.SmsMessage;
 import android.util.Log;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 public class SmsReceiver extends BroadcastReceiver {
-    private static final String TAG = "MittoPaySmsReceiver";
+    private static final String TAG = "YouPISmsReceiver";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -20,17 +22,36 @@ public class SmsReceiver extends BroadcastReceiver {
         SmsMessage[] messages = Telephony.Sms.Intents.getMessagesFromIntent(intent);
         if (messages == null || messages.length == 0) return;
 
-        final ApiClient client = new ApiClient(context);
+        final Context appContext = context.getApplicationContext();
+        final ApiClient client = new ApiClient(appContext);
         if (!client.isPaired()) {
-            Log.w(TAG, "SMS received but device is not paired with Mitto Pay Gateway. Skipping.");
+            Log.w(TAG, "SMS received but device is not paired with YouPI Gateway. Skipping.");
             return;
         }
 
+        // A long SMS is delivered as several parts in one broadcast. Bank alerts often put the
+        // amount in one part and the UPI reference (UTR) in the next, so the parts are joined per
+        // sender before filtering; evaluating each part alone dropped or truncated such alerts.
+        Map<String, StringBuilder> bodies = new LinkedHashMap<>();
+        Map<String, Long> times = new LinkedHashMap<>();
         for (SmsMessage sms : messages) {
             if (sms == null) continue;
-            final String sender = sms.getOriginatingAddress();
-            final String body = sms.getMessageBody();
-            final long timestamp = sms.getTimestampMillis();
+            String sender = sms.getOriginatingAddress();
+            if (sender == null) sender = "";
+            StringBuilder sb = bodies.get(sender);
+            if (sb == null) {
+                sb = new StringBuilder();
+                bodies.put(sender, sb);
+                times.put(sender, sms.getTimestampMillis());
+            }
+            String part = sms.getMessageBody();
+            if (part != null) sb.append(part);
+        }
+
+        for (Map.Entry<String, StringBuilder> entry : bodies.entrySet()) {
+            final String sender = entry.getKey();
+            final String body = entry.getValue().toString();
+            final long timestamp = times.get(sender);
 
             // Strict On-Device Data Minimization & Privacy Protection:
             // Evaluate on-device first. Discard personal, non-financial, or debit messages immediately.
@@ -43,12 +64,15 @@ public class SmsReceiver extends BroadcastReceiver {
             final String clientMessageId = UUID.randomUUID().toString();
             Log.i(TAG, "Valid bank credit alert accepted from [" + sender + "]. Dispatching ID: " + clientMessageId);
 
-            // Dispatch validated financial alert to Mitto Pay Gateway in asynchronous worker thread
+            // Dispatch on a worker thread (the always-running foreground service keeps the process
+            // alive), retrying while the gateway is unreachable so a brief network drop does not
+            // lose the payment alert.
             new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    boolean success = client.sendSms(sender, body, timestamp, clientMessageId);
-                    Log.i(TAG, "Dispatched bank SMS to Mitto Pay Gateway (" + clientMessageId + "): " + (success ? "SUCCESS" : "FAILED"));
+                    // One client per dispatch: retry state must not be shared between concurrent alerts.
+                    boolean success = new ApiClient(appContext).sendSmsWithRetry(sender, body, timestamp, clientMessageId);
+                    Log.i(TAG, "Dispatched bank SMS to YouPI Gateway (" + clientMessageId + "): " + (success ? "SUCCESS" : "FAILED"));
                 }
             }).start();
         }
