@@ -136,14 +136,15 @@ try {
   }
   collectClasses(BIN_DIR);
 
-  // Write all input class paths into an argfile (@args.txt) so D8 reads raw paths without shell expansion of '$'
+  // Write all input class paths into an argfile (@args.txt) so D8 reads raw paths without shell expansion of '$'.
+  // The argfile is passed by its bare name from inside WORK_DIR: a quoted @"..." argument, and an
+  // extra nested `cmd.exe /c ""...""` wrapper, both broke on Windows ("The syntax of the command is
+  // incorrect"). execSync already runs through cmd.exe /d /s /c on Windows, which handles a quoted
+  // .bat path as the first token.
   const d8ArgFile = path.join(WORK_DIR, 'd8_inputs.txt');
   fs.writeFileSync(d8ArgFile, [...classFiles, ...libJars].join('\n'), 'utf8');
 
-  const d8Cmd = isWin
-    ? `cmd.exe /c ""${D8}" --lib "${ANDROID_JAR}" --output "${WORK_DIR}" @"${d8ArgFile}""`
-    : `"${D8}" --lib "${ANDROID_JAR}" --output "${WORK_DIR}" @"${d8ArgFile}"`;
-  execSync(d8Cmd, { stdio: 'inherit' });
+  execSync(`"${D8}" --lib "${ANDROID_JAR}" --output . @d8_inputs.txt`, { stdio: 'inherit', cwd: WORK_DIR });
 
   const dexPath = path.join(WORK_DIR, 'classes.dex');
   if (!fs.existsSync(dexPath)) {
@@ -173,27 +174,45 @@ try {
   });
   console.log('   ✅ APK 4-byte alignment verified.');
 
-  // 5. Generate Keystore & Sign APK with apksigner (v1, v2, and v3 signatures)
-  console.log('🔏 [5/6] Signing APK with Android v2 + v3 cryptographic certificate...');
-  const keystorePath = path.join(WORK_DIR, 'release.keystore');
-  const ksPass = 'youpipg123';
-  const alias = 'youpi_gateway';
+  // 5. Sign APK with apksigner (v2 + v3 signatures)
+  //
+  // Use a persistent release key when one is configured, so every build is signed by the same key and
+  // installs as an update over the previous one:
+  //   YOUPI_APK_KEYSTORE          path to the keystore file (keep it OUTSIDE the repository)
+  //   YOUPI_APK_KEYSTORE_PASS     its password, or YOUPI_APK_KEYSTORE_PASS_FILE = path to a file holding it
+  //   YOUPI_APK_KEY_ALIAS         key alias (default: youpi_gateway)
+  // Without them a random throwaway key is generated for this build only (a fresh install is then
+  // required on every rebuild, and the signature identifies nobody).
+  const alias = process.env.YOUPI_APK_KEY_ALIAS || 'youpi_gateway';
+  let keystorePath = process.env.YOUPI_APK_KEYSTORE || '';
+  let ksPass = process.env.YOUPI_APK_KEYSTORE_PASS || '';
+  if (!ksPass && process.env.YOUPI_APK_KEYSTORE_PASS_FILE) {
+    ksPass = fs.readFileSync(process.env.YOUPI_APK_KEYSTORE_PASS_FILE, 'utf8').trim();
+  }
 
-  execSync(`"${KEYTOOL}" -genkeypair -v -keystore "${keystorePath}" -alias "${alias}" -keyalg RSA -keysize 2048 -validity 10000 -storepass "${ksPass}" -keypass "${ksPass}" -dname "CN=YouPI SMS Gateway, OU=Merchant Payments, O=YouPI PG, L=Mumbai, ST=MH, C=IN"`, {
-    stdio: 'pipe'
+  if (keystorePath) {
+    if (!fs.existsSync(keystorePath)) throw new Error(`YOUPI_APK_KEYSTORE not found: ${keystorePath}`);
+    if (!ksPass) throw new Error('YOUPI_APK_KEYSTORE is set but no password was given (YOUPI_APK_KEYSTORE_PASS or YOUPI_APK_KEYSTORE_PASS_FILE).');
+    console.log(`🔏 [5/6] Signing APK with release key ${keystorePath} (alias ${alias})...`);
+  } else {
+    console.warn('⚠️  [5/6] No YOUPI_APK_KEYSTORE configured: signing with a THROWAWAY key. This build cannot update an earlier install.');
+    keystorePath = path.join(WORK_DIR, 'throwaway.keystore');
+    ksPass = crypto.randomBytes(24).toString('hex');
+    execSync(`"${KEYTOOL}" -genkeypair -keystore "${keystorePath}" -alias "${alias}" -keyalg RSA -keysize 2048 -validity 10000 -storepass "${ksPass}" -keypass "${ksPass}" -dname "CN=YouPI Observer (throwaway build key)"`, {
+      stdio: 'pipe'
+    });
+  }
+
+  // The password reaches apksigner through an environment variable, never on the command line.
+  const signEnv = { ...process.env, YOUPI_KS_PASS: ksPass };
+  const signedApk = path.join(WORK_DIR, 'signed.apk');
+  execSync(`"${APKSIGNER}" sign --ks "${keystorePath}" --ks-pass env:YOUPI_KS_PASS --key-pass env:YOUPI_KS_PASS --ks-key-alias "${alias}" --out "${signedApk}" "${alignedApk}"`, {
+    stdio: 'inherit',
+    env: signEnv
   });
 
-  const signedApk = path.join(WORK_DIR, 'signed.apk');
-  const signCmd = isWin
-    ? `cmd.exe /c ""${APKSIGNER}" sign --ks "${keystorePath}" --ks-pass pass:${ksPass} --key-pass pass:${ksPass} --ks-key-alias "${alias}" --out "${signedApk}" "${alignedApk}""`
-    : `"${APKSIGNER}" sign --ks "${keystorePath}" --ks-pass pass:${ksPass} --key-pass pass:${ksPass} --ks-key-alias "${alias}" --out "${signedApk}" "${alignedApk}"`;
-  execSync(signCmd, { stdio: 'inherit' });
-
   // Verify APK signature
-  const verifyCmd = isWin
-    ? `cmd.exe /c ""${APKSIGNER}" verify --verbose "${signedApk}""`
-    : `"${APKSIGNER}" verify --verbose "${signedApk}"`;
-  const verifyOutput = execSync(verifyCmd, {
+  const verifyOutput = execSync(`"${APKSIGNER}" verify --verbose "${signedApk}"`, {
     encoding: 'utf8'
   });
   console.log('   ✅ Verification Report:\n' + verifyOutput.trim().split('\n').map(l => '      ' + l).join('\n'));
